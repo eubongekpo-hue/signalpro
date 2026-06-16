@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 const PAIRS = [
   { label: "XAU/USD", symbol: "XAU/USD", decimals: 2,  base: 2325.00, vol: 1.8    },
@@ -13,6 +13,31 @@ const TIMEFRAMES = [
   { label: "5 min",  interval: "5min",  seconds: 300 },
   { label: "15 min", interval: "15min", seconds: 900 },
 ];
+
+// ── Sound Alert ───────────────────────────────────────────────────────────────
+function playAlert(direction) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const notes = direction === "UP"
+      ? [523, 659, 784]   // C-E-G ascending — BUY
+      : [784, 659, 523];  // G-E-C descending — SELL
+
+    notes.forEach((freq, i) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = "sine";
+      const start = ctx.currentTime + i * 0.18;
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(0.4, start + 0.05);
+      gain.gain.linearRampToValueAtTime(0, start + 0.16);
+      osc.start(start);
+      osc.stop(start + 0.18);
+    });
+  } catch {}
+}
 
 // ── EMA ──────────────────────────────────────────────────────────────────────
 function calcEMA(data, period) {
@@ -44,7 +69,7 @@ function computeSignal(closes) {
            price: last, allEma8: e8, allEma21: e21 };
 }
 
-// ── Seed candles ─────────────────────────────────────────────────────────────
+// ── Seed candles ──────────────────────────────────────────────────────────────
 function seedCandles(pair, count = 80) {
   const candles = [];
   let price = pair.base + (Math.random() - 0.5) * pair.vol * 4;
@@ -54,19 +79,15 @@ function seedCandles(pair, count = 80) {
   for (let i = 0; i < count; i++) {
     trendCount++;
     if (trendCount > 15 + Math.random() * 20) {
-      trend *= -1;
-      trendStrength = Math.random() * 0.3 + 0.1;
-      trendCount = 0;
+      trend *= -1; trendStrength = Math.random() * 0.3 + 0.1; trendCount = 0;
     }
     const o = price;
-    const drift = trend * trendStrength * pair.vol;
-    const noise = (Math.random() - 0.5) * pair.vol * 2;
-    price = Math.max(price + drift + noise, pair.base * 0.85);
+    price = Math.max(price + trend * trendStrength * pair.vol + (Math.random() - 0.5) * pair.vol * 2, pair.base * 0.85);
     const c = price;
     const wick = pair.vol * (Math.random() * 0.8 + 0.2);
-    const h = Math.max(o, c) + wick * Math.random();
-    const l = Math.min(o, c) - wick * Math.random();
-    candles.push({ open: o, high: h, low: l, close: c, time: Date.now() - (count - i) * 60000 });
+    candles.push({ open: o, high: Math.max(o,c) + wick * Math.random(),
+                   low: Math.min(o,c) - wick * Math.random(), close: c,
+                   time: Date.now() - (count - i) * 60000 });
   }
   return candles;
 }
@@ -88,53 +109,50 @@ function MiniChart({ candles, sig }) {
     const cw  = Math.max(2, (W - pad * 2) / candles.length - 1);
     candles.forEach((c, i) => {
       const x = toX(i), bull = c.close >= c.open;
-      ctx.strokeStyle = bull ? "#00FF88" : "#FF3B5C";
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = bull ? "#00FF88" : "#FF3B5C"; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(x, toY(c.high)); ctx.lineTo(x, toY(c.low)); ctx.stroke();
       ctx.fillStyle = bull ? "#00FF8840" : "#FF3B5C40";
-      const y1 = toY(Math.max(c.open, c.close)), y2 = toY(Math.min(c.open, c.close));
-      ctx.fillRect(x - cw / 2, y1, cw, Math.max(1, y2 - y1));
+      const y1 = toY(Math.max(c.open,c.close)), y2 = toY(Math.min(c.open,c.close));
+      ctx.fillRect(x - cw/2, y1, cw, Math.max(1, y2-y1));
     });
     if (sig) {
       const draw = (arr, color) => {
         if (arr.length < 2) return;
         ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.8;
-        arr.forEach((v, i) => {
-          i === 0 ? ctx.moveTo(toX(candles.length - arr.length + i), toY(v))
-                  : ctx.lineTo(toX(candles.length - arr.length + i), toY(v));
-        });
+        arr.forEach((v,i) => i===0 ? ctx.moveTo(toX(candles.length-arr.length+i),toY(v))
+                                   : ctx.lineTo(toX(candles.length-arr.length+i),toY(v)));
         ctx.stroke();
       };
       draw(sig.allEma8.slice(-candles.length),  "#00D4FF");
       draw(sig.allEma21.slice(-candles.length), "#FF8C00");
     }
-    const lp = candles[candles.length - 1].close;
-    ctx.beginPath();
-    ctx.arc(toX(candles.length - 1), toY(lp), 4, 0, Math.PI * 2);
-    ctx.fillStyle   = sig?.direction === "UP" ? "#00FF88" : sig?.direction === "DOWN" ? "#FF3B5C" : "#00D4FF";
-    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8;
-    ctx.fill(); ctx.shadowBlur = 0;
+    const lp = candles[candles.length-1].close;
+    ctx.beginPath(); ctx.arc(toX(candles.length-1), toY(lp), 4, 0, Math.PI*2);
+    ctx.fillStyle = sig?.direction==="UP" ? "#00FF88" : sig?.direction==="DOWN" ? "#FF3B5C" : "#00D4FF";
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0;
   }, [candles, sig]);
   return <canvas ref={ref} width={300} height={110} style={{ width:"100%", height:110 }} />;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [pair,       setPair]       = useState(PAIRS[0]);
-  const [tf,         setTf]         = useState(TIMEFRAMES[1]);
-  const [candles,    setCandles]    = useState([]);
-  const [signal,     setSignal]     = useState(null);
-  const [livePrice,  setLivePrice]  = useState(null);
-  const [prevPrice,  setPrevPrice]  = useState(null);
-  const [history,    setHistory]    = useState([]);
-  const [pulseKey,   setPulseKey]   = useState(0);
-  const [lastUpdate, setLastUpdate] = useState(null);
-  const [mode,       setMode]       = useState("sim");
-  const prevSigRef  = useRef(null);
-  const intervalRef = useRef(null);
-  const tickRef     = useRef(null);
+  const [pair,        setPair]        = useState(PAIRS[0]);
+  const [tf,          setTf]          = useState(TIMEFRAMES[1]);
+  const [candles,     setCandles]     = useState([]);
+  const [signal,      setSignal]      = useState(null);
+  const [livePrice,   setLivePrice]   = useState(null);
+  const [prevPrice,   setPrevPrice]   = useState(null);
+  const [history,     setHistory]     = useState([]);
+  const [pulseKey,    setPulseKey]    = useState(0);
+  const [lastUpdate,  setLastUpdate]  = useState(null);
+  const [mode,        setMode]        = useState("sim");
+  const [alertOn,     setAlertOn]     = useState(true);
+  const [lastAlert,   setLastAlert]   = useState(null); // {dir, time}
+  const prevSigRef   = useRef(null);
+  const intervalRef  = useRef(null);
+  const tickRef      = useRef(null);
 
-  const processSignal = (built, currentPair) => {
+  const processSignal = useCallback((built, currentPair) => {
     const closes = built.map(c => c.close);
     const latest = closes[closes.length - 1];
     setLivePrice(prev => { setPrevPrice(prev); return latest; });
@@ -142,6 +160,9 @@ export default function App() {
     if (sig && prevSigRef.current) {
       if (sig.crossover && sig.direction !== prevSigRef.current.direction) {
         setPulseKey(k => k + 1);
+        // 🔔 Sound alert
+        if (alertOn) playAlert(sig.direction);
+        setLastAlert({ dir: sig.direction, time: new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }) });
         setHistory(h => [{
           time:     new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }),
           dir:      sig.direction,
@@ -154,21 +175,18 @@ export default function App() {
     prevSigRef.current = sig;
     setSignal(sig);
     setLastUpdate(new Date());
-  };
+  }, [alertOn]);
 
-  // ── Fetch via Vercel proxy (same origin = no CORS) ────────────────────────
-  const tryLive = async (currentPair, currentTf) => {
+  const tryLive = useCallback(async (currentPair, currentTf) => {
     try {
       const url  = `/api/proxy?symbol=${encodeURIComponent(currentPair.symbol)}&interval=${currentTf.interval}`;
       const res  = await fetch(url);
       const data = await res.json();
       if (data.status === "ok" && data.values?.length) {
         const built = [...data.values].reverse().map(v => ({
-          time:  new Date(v.datetime).getTime(),
-          open:  parseFloat(v.open),
-          high:  parseFloat(v.high),
-          low:   parseFloat(v.low),
-          close: parseFloat(v.close),
+          time: new Date(v.datetime).getTime(),
+          open: parseFloat(v.open), high: parseFloat(v.high),
+          low:  parseFloat(v.low),  close: parseFloat(v.close),
         }));
         setCandles(built);
         processSignal(built, currentPair);
@@ -177,65 +195,41 @@ export default function App() {
       }
     } catch {}
     return false;
-  };
+  }, [processSignal]);
 
-  // ── Simulation tick ───────────────────────────────────────────────────────
-  const simTick = (currentPair, currentTf) => {
+  const simTick = useCallback((currentPair, currentTf) => {
     setCandles(prev => {
       if (!prev.length) return prev;
       const last   = prev[prev.length - 1];
-      const drift  = (Math.random() - 0.499) * currentPair.vol * 1.2;
-      const close  = Math.max(last.close + drift, currentPair.base * 0.85);
+      const close  = Math.max(last.close + (Math.random()-0.499)*currentPair.vol*1.2, currentPair.base*0.85);
       const now    = Date.now();
-      const bucket = Math.floor(now / (currentTf.seconds * 1000)) * (currentTf.seconds * 1000);
-      let built;
-      if (last.time === bucket) {
-        built = [...prev.slice(0, -1), {
-          ...last, high: Math.max(last.high, close),
-          low: Math.min(last.low, close), close,
-        }];
-      } else {
-        built = [...prev, {
-          time: bucket, open: last.close,
-          high: Math.max(last.close, close),
-          low:  Math.min(last.close, close), close,
-        }].slice(-100);
-      }
+      const bucket = Math.floor(now/(currentTf.seconds*1000))*(currentTf.seconds*1000);
+      const built  = last.time === bucket
+        ? [...prev.slice(0,-1), { ...last, high:Math.max(last.high,close), low:Math.min(last.low,close), close }]
+        : [...prev, { time:bucket, open:last.close, high:Math.max(last.close,close), low:Math.min(last.close,close), close }].slice(-100);
       processSignal(built, currentPair);
       return built;
     });
-  };
+  }, [processSignal]);
 
   useEffect(() => {
     clearInterval(intervalRef.current);
     clearInterval(tickRef.current);
     setCandles([]); setSignal(null); setLivePrice(null);
     prevSigRef.current = null;
-
-    // Seed sim immediately so chart shows right away
     const seed = seedCandles(pair);
-    setCandles(seed);
-    processSignal(seed, pair);
-    setMode("sim");
-
-    // Try live via proxy
+    setCandles(seed); processSignal(seed, pair); setMode("sim");
     tryLive(pair, tf).then(ok => {
       if (ok) {
         intervalRef.current = setInterval(() => tryLive(pair, tf), 15000);
       } else {
-        // Fallback simulation
         tickRef.current = setInterval(() => simTick(pair, tf), 2000);
       }
     });
-
-    return () => {
-      clearInterval(intervalRef.current);
-      clearInterval(tickRef.current);
-    };
+    return () => { clearInterval(intervalRef.current); clearInterval(tickRef.current); };
   }, [pair, tf]);
 
-  const dirColor = signal?.direction === "UP"  ? "#00FF88"
-                 : signal?.direction === "DOWN" ? "#FF3B5C" : "#94A3B8";
+  const dirColor = signal?.direction==="UP" ? "#00FF88" : signal?.direction==="DOWN" ? "#FF3B5C" : "#94A3B8";
 
   return (
     <div style={{ background:"#080C18", minHeight:"100vh", color:"#E2E8F0",
@@ -247,6 +241,7 @@ export default function App() {
         @keyframes ripple  { 0%{box-shadow:0 0 0 0 rgba(0,255,136,0.4)} 100%{box-shadow:0 0 0 20px rgba(0,255,136,0)} }
         @keyframes slideIn { from{opacity:0;transform:translateY(-5px)} to{opacity:1;transform:translateY(0)} }
         @keyframes flash   { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        @keyframes alertPop { 0%{transform:scale(0.8);opacity:0} 60%{transform:scale(1.05)} 100%{transform:scale(1);opacity:1} }
         button { border:none; outline:none; }
         button:active { opacity:0.7; }
       `}</style>
@@ -265,36 +260,64 @@ export default function App() {
             <div style={{ fontSize:10, color:"#334155" }}>Live Forex · EMA 8/21</div>
           </div>
         </div>
-        <div style={{ textAlign:"right" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:6, justifyContent:"flex-end" }}>
-            <div style={{ width:7, height:7, borderRadius:"50%",
-              background: mode==="live" ? "#00FF88" : "#00D4FF",
-              animation:"blink 2s infinite" }} />
-            <span style={{ fontSize:11, fontFamily:"'JetBrains Mono'", fontWeight:700,
-              color: mode==="live" ? "#00FF88" : "#00D4FF" }}>
-              {mode==="live" ? "LIVE" : "PRACTICE"}
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          {/* Alert toggle */}
+          <button onClick={() => setAlertOn(a => !a)} style={{
+            background: alertOn ? "#00FF8820" : "#1A2540",
+            border:`1px solid ${alertOn ? "#00FF88" : "#334155"}`,
+            borderRadius:8, padding:"6px 10px", cursor:"pointer",
+            display:"flex", alignItems:"center", gap:5,
+          }}>
+            <span style={{ fontSize:14 }}>{alertOn ? "🔔" : "🔕"}</span>
+            <span style={{ fontSize:10, fontFamily:"'JetBrains Mono'", fontWeight:700,
+              color: alertOn ? "#00FF88" : "#475569" }}>
+              {alertOn ? "ON" : "OFF"}
             </span>
-          </div>
-          {lastUpdate && (
-            <div style={{ fontSize:9, color:"#334155", fontFamily:"'JetBrains Mono'", marginTop:2 }}>
-              {lastUpdate.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" })}
+          </button>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6, justifyContent:"flex-end" }}>
+              <div style={{ width:7, height:7, borderRadius:"50%",
+                background: mode==="live" ? "#00FF88" : "#00D4FF",
+                animation:"blink 2s infinite" }} />
+              <span style={{ fontSize:11, fontFamily:"'JetBrains Mono'", fontWeight:700,
+                color: mode==="live" ? "#00FF88" : "#00D4FF" }}>
+                {mode==="live" ? "LIVE" : "PRACTICE"}
+              </span>
             </div>
-          )}
+            {lastUpdate && (
+              <div style={{ fontSize:9, color:"#334155", fontFamily:"'JetBrains Mono'", marginTop:2 }}>
+                {lastUpdate.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       <div style={{ padding:"14px 14px 0", maxWidth:480, margin:"0 auto" }}>
 
-        {/* Mode banner */}
-        {mode === "sim" && (
-          <div style={{ background:"#06101A", border:"1px solid #00D4FF33",
-            borderRadius:12, padding:"11px 14px", marginBottom:10,
-            display:"flex", gap:10, alignItems:"center" }}>
-            <span style={{ fontSize:16 }}>🔵</span>
-            <div style={{ fontSize:11, color:"#334155", lineHeight:1.5 }}>
-              <strong style={{ color:"#00D4FF" }}>Connecting to live data...</strong> Using
-              realistic simulation while connecting. Will switch to LIVE automatically.
+        {/* 🔔 Crossover Alert Banner */}
+        {lastAlert && (
+          <div style={{
+            background: lastAlert.dir==="UP" ? "#00FF8815" : "#FF3B5C15",
+            border:`2px solid ${lastAlert.dir==="UP" ? "#00FF88" : "#FF3B5C"}`,
+            borderRadius:12, padding:"12px 16px", marginBottom:10,
+            display:"flex", alignItems:"center", gap:12,
+            animation:"alertPop 0.4s ease",
+          }}>
+            <div style={{ fontSize:28 }}>{lastAlert.dir==="UP" ? "🟢" : "🔴"}</div>
+            <div>
+              <div style={{ fontSize:14, fontWeight:800, fontFamily:"'JetBrains Mono'",
+                color: lastAlert.dir==="UP" ? "#00FF88" : "#FF3B5C" }}>
+                {lastAlert.dir==="UP" ? "⚡ BUY SIGNAL" : "⚡ SELL SIGNAL"}
+              </div>
+              <div style={{ fontSize:11, color:"#64748B", marginTop:2 }}>
+                EMA Crossover at {lastAlert.time} · {pair.label}
+              </div>
             </div>
+            <button onClick={() => setLastAlert(null)} style={{
+              marginLeft:"auto", background:"transparent", color:"#334155",
+              fontSize:18, cursor:"pointer", padding:"4px 8px",
+            }}>✕</button>
           </div>
         )}
 
@@ -349,7 +372,7 @@ export default function App() {
               <div style={{
                 fontSize:30, fontWeight:800, fontFamily:"'JetBrains Mono'", letterSpacing:-1,
                 color: livePrice && prevPrice
-                  ? (livePrice > prevPrice ? "#00FF88" : livePrice < prevPrice ? "#FF3B5C" : "#E2E8F0")
+                  ? (livePrice>prevPrice ? "#00FF88" : livePrice<prevPrice ? "#FF3B5C" : "#E2E8F0")
                   : "#E2E8F0",
                 transition:"color 0.3s",
               }}>
@@ -359,9 +382,7 @@ export default function App() {
             </div>
             <div style={{ textAlign:"right" }}>
               <div style={{ fontSize:10, color:"#334155" }}>CANDLES</div>
-              <div style={{ fontSize:13, fontFamily:"'JetBrains Mono'", color:"#475569" }}>
-                {candles.length}
-              </div>
+              <div style={{ fontSize:13, fontFamily:"'JetBrains Mono'", color:"#475569" }}>{candles.length}</div>
               <div style={{ fontSize:9, color:"#1E2A42", marginTop:4 }}>
                 <span style={{ color:"#00D4FF" }}>━</span> EMA8&nbsp;
                 <span style={{ color:"#FF8C00" }}>━</span> EMA21
@@ -374,87 +395,62 @@ export default function App() {
         {/* Signal card */}
         {signal && (
           <div key={pulseKey} style={{
-            background: signal.direction==="UP"  ? "#00FF8806"
-                      : signal.direction==="DOWN" ? "#FF3B5C06" : "#1A254006",
+            background: signal.direction==="UP"  ? "#00FF8806" : signal.direction==="DOWN" ? "#FF3B5C06" : "#1A254006",
             border:`1.5px solid ${dirColor}`,
             borderRadius:12, padding:"14px 16px", marginBottom:10,
             animation: signal.crossover ? "ripple 0.7s ease-out" : "none",
           }}>
-            <div style={{ display:"flex", justifyContent:"space-between",
-              alignItems:"center", marginBottom:10 }}>
-              <div style={{ fontSize:10, color:"#334155", letterSpacing:1.2,
-                fontWeight:700, textTransform:"uppercase" }}>Signal Direction</div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ fontSize:10, color:"#334155", letterSpacing:1.2, fontWeight:700, textTransform:"uppercase" }}>
+                Signal Direction
+              </div>
               {signal.crossover && (
-                <div style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
-                  color:"#00D4FF", fontWeight:700, animation:"flash 1s ease 3" }}>
+                <div style={{ fontSize:10, fontFamily:"'JetBrains Mono'", color:"#00D4FF", fontWeight:700, animation:"flash 1s ease 3" }}>
                   ⚡ CROSSOVER
                 </div>
               )}
             </div>
-
             <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
-              <div style={{
-                width:52, height:52, borderRadius:12, fontSize:26,
+              <div style={{ width:52, height:52, borderRadius:12, fontSize:26,
                 display:"flex", alignItems:"center", justifyContent:"center",
-                background: signal.direction==="UP"  ? "#00FF8820"
-                           : signal.direction==="DOWN" ? "#FF3B5C20" : "#1E2A4230",
-                border:`1px solid ${dirColor}44`,
-              }}>
+                background: signal.direction==="UP" ? "#00FF8820" : signal.direction==="DOWN" ? "#FF3B5C20" : "#1E2A4230",
+                border:`1px solid ${dirColor}44` }}>
                 {signal.direction==="UP" ? "↑" : signal.direction==="DOWN" ? "↓" : "—"}
               </div>
               <div>
                 <div style={{ fontSize:28, fontWeight:800, fontFamily:"'JetBrains Mono'",
-                  color:dirColor, letterSpacing:-1, lineHeight:1 }}>
-                  {signal.direction}
-                </div>
+                  color:dirColor, letterSpacing:-1, lineHeight:1 }}>{signal.direction}</div>
                 <div style={{ fontSize:11, color:"#475569", marginTop:2 }}>{signal.trend}</div>
               </div>
             </div>
 
-            {/* Strength bar */}
             <div style={{ marginBottom:12 }}>
               <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
-                <span style={{ fontSize:10, color:"#334155", fontWeight:700,
-                  textTransform:"uppercase", letterSpacing:1 }}>Trend Strength</span>
-                <span style={{ fontSize:11, fontFamily:"'JetBrains Mono'",
-                  fontWeight:700, color:dirColor }}>{signal.strength}%</span>
+                <span style={{ fontSize:10, color:"#334155", fontWeight:700, textTransform:"uppercase", letterSpacing:1 }}>Trend Strength</span>
+                <span style={{ fontSize:11, fontFamily:"'JetBrains Mono'", fontWeight:700, color:dirColor }}>{signal.strength}%</span>
               </div>
               <div style={{ height:5, background:"#0D1320", borderRadius:999, overflow:"hidden" }}>
-                <div style={{
-                  height:"100%", borderRadius:999, transition:"width 1s ease",
-                  width:`${signal.strength}%`,
-                  background: signal.direction==="UP"
-                    ? "linear-gradient(90deg,#00994D,#00FF88)"
-                    : signal.direction==="DOWN"
-                    ? "linear-gradient(90deg,#991F33,#FF3B5C)"
-                    : "#334155",
-                }} />
+                <div style={{ height:"100%", borderRadius:999, transition:"width 1s ease", width:`${signal.strength}%`,
+                  background: signal.direction==="UP" ? "linear-gradient(90deg,#00994D,#00FF88)"
+                             : signal.direction==="DOWN" ? "linear-gradient(90deg,#991F33,#FF3B5C)" : "#334155" }} />
               </div>
             </div>
 
-            {/* EMA values */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 }}>
-              {[
-                { label:"EMA 8",  val:signal.ema8,  color:"#00D4FF" },
-                { label:"EMA 21", val:signal.ema21, color:"#FF8C00" },
-              ].map(({ label, val, color }) => (
-                <div key={label} style={{ background:"#080C18",
-                  border:`1px solid ${color}33`, borderRadius:8, padding:"8px 10px" }}>
+              {[{ label:"EMA 8", val:signal.ema8, color:"#00D4FF" }, { label:"EMA 21", val:signal.ema21, color:"#FF8C00" }]
+                .map(({ label, val, color }) => (
+                <div key={label} style={{ background:"#080C18", border:`1px solid ${color}33`, borderRadius:8, padding:"8px 10px" }}>
                   <div style={{ fontSize:10, color, fontWeight:700, letterSpacing:0.8 }}>{label}</div>
-                  <div style={{ fontSize:12, fontFamily:"'JetBrains Mono'",
-                    fontWeight:600, marginTop:2, color:"#CBD5E1" }}>
+                  <div style={{ fontSize:12, fontFamily:"'JetBrains Mono'", fontWeight:600, marginTop:2, color:"#CBD5E1" }}>
                     {val.toFixed(pair.decimals)}
                   </div>
                 </div>
               ))}
             </div>
 
-            {/* Entry checklist */}
             {signal.direction !== "NEUTRAL" && (
-              <div style={{ background:"#080C18", border:"1px solid #1A2540",
-                borderRadius:8, padding:"10px 12px" }}>
-                <div style={{ fontSize:10, color:"#334155", fontWeight:700,
-                  letterSpacing:1, textTransform:"uppercase", marginBottom:6 }}>
+              <div style={{ background:"#080C18", border:"1px solid #1A2540", borderRadius:8, padding:"10px 12px" }}>
+                <div style={{ fontSize:10, color:"#334155", fontWeight:700, letterSpacing:1, textTransform:"uppercase", marginBottom:6 }}>
                   Entry Checklist
                 </div>
                 {[
@@ -463,8 +459,7 @@ export default function App() {
                   { text: "Set stop-loss beyond recent swing", ok:false },
                   { text: "Confirm bias on higher timeframe", ok:false },
                 ].map((item, i) => (
-                  <div key={i} style={{ fontSize:11,
-                    color: item.ok ? "#94A3B8" : "#475569", marginBottom:3, paddingLeft:2 }}>
+                  <div key={i} style={{ fontSize:11, color:item.ok ? "#94A3B8" : "#475569", marginBottom:3, paddingLeft:2 }}>
                     {item.ok ? "✅" : "⚠️"} {item.text}
                   </div>
                 ))}
@@ -478,33 +473,24 @@ export default function App() {
           <div style={{ background:"#0F1628", border:"1px solid #1A2540",
             borderRadius:12, padding:"12px 14px", marginBottom:10 }}>
             <div style={{ fontSize:10, color:"#334155", letterSpacing:1.2,
-              fontWeight:700, textTransform:"uppercase", marginBottom:10 }}>
-              Crossover History
-            </div>
+              fontWeight:700, textTransform:"uppercase", marginBottom:10 }}>Crossover History</div>
             {history.map((h, i) => (
-              <div key={i} style={{
-                display:"flex", justifyContent:"space-between", alignItems:"center",
-                padding:"7px 0",
-                borderBottom: i < history.length - 1 ? "1px solid #0D1320" : "none",
-                animation: i===0 ? "slideIn 0.3s ease" : "none",
-              }}>
-                <span style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
-                  color:"#334155", minWidth:72 }}>{h.time}</span>
-                <span style={{ fontSize:10, color:"#475569",
-                  fontFamily:"'JetBrains Mono'" }}>{h.pair}</span>
+              <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                padding:"7px 0", borderBottom: i<history.length-1 ? "1px solid #0D1320" : "none",
+                animation: i===0 ? "slideIn 0.3s ease" : "none" }}>
+                <span style={{ fontSize:10, fontFamily:"'JetBrains Mono'", color:"#334155", minWidth:72 }}>{h.time}</span>
+                <span style={{ fontSize:10, color:"#475569", fontFamily:"'JetBrains Mono'" }}>{h.pair}</span>
                 <span style={{ fontSize:11, fontWeight:700, fontFamily:"'JetBrains Mono'",
                   color: h.dir==="UP" ? "#00FF88" : "#FF3B5C" }}>
                   {h.dir==="UP" ? "↑" : "↓"} {h.price}
                 </span>
-                <span style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
-                  color:"#334155" }}>{h.strength}%</span>
+                <span style={{ fontSize:10, fontFamily:"'JetBrains Mono'", color:"#334155" }}>{h.strength}%</span>
               </div>
             ))}
           </div>
         )}
 
-        <div style={{ fontSize:10, color:"#1E2A42", textAlign:"center",
-          lineHeight:1.7, padding:"4px 8px" }}>
+        <div style={{ fontSize:10, color:"#1E2A42", textAlign:"center", lineHeight:1.7, padding:"4px 8px" }}>
           ⚠️ Educational use only. Not financial advice.<br />
           Always use stop-losses and your own analysis.
         </div>
