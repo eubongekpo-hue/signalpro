@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 
-const TD_KEY = "304179a7e4f24aacae4e576902f323f1";
-
 const PAIRS = [
   { label: "XAU/USD", symbol: "XAU/USD", decimals: 2,  base: 2325.00, vol: 1.8    },
   { label: "EUR/USD", symbol: "EUR/USD", decimals: 5,  base: 1.08450, vol: 0.00035 },
@@ -16,6 +14,7 @@ const TIMEFRAMES = [
   { label: "15 min", interval: "15min", seconds: 900 },
 ];
 
+// ── EMA ──────────────────────────────────────────────────────────────────────
 function calcEMA(data, period) {
   if (data.length < period) return [];
   const k = 2 / (period + 1);
@@ -45,6 +44,7 @@ function computeSignal(closes) {
            price: last, allEma8: e8, allEma21: e21 };
 }
 
+// ── Seed candles ─────────────────────────────────────────────────────────────
 function seedCandles(pair, count = 80) {
   const candles = [];
   let price = pair.base + (Math.random() - 0.5) * pair.vol * 4;
@@ -71,6 +71,7 @@ function seedCandles(pair, count = 80) {
   return candles;
 }
 
+// ── Chart ─────────────────────────────────────────────────────────────────────
 function MiniChart({ candles, sig }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -117,6 +118,7 @@ function MiniChart({ candles, sig }) {
   return <canvas ref={ref} width={300} height={110} style={{ width:"100%", height:110 }} />;
 }
 
+// ── Main ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [pair,       setPair]       = useState(PAIRS[0]);
   const [tf,         setTf]         = useState(TIMEFRAMES[1]);
@@ -154,16 +156,19 @@ export default function App() {
     setLastUpdate(new Date());
   };
 
+  // ── Fetch via Vercel proxy (same origin = no CORS) ────────────────────────
   const tryLive = async (currentPair, currentTf) => {
     try {
-      const url  = `https://api.twelvedata.com/time_series?symbol=${currentPair.symbol}&interval=${currentTf.interval}&outputsize=80&apikey=${TD_KEY}`;
+      const url  = `/api/proxy?symbol=${encodeURIComponent(currentPair.symbol)}&interval=${currentTf.interval}`;
       const res  = await fetch(url);
       const data = await res.json();
       if (data.status === "ok" && data.values?.length) {
         const built = [...data.values].reverse().map(v => ({
-          time: new Date(v.datetime).getTime(),
-          open: parseFloat(v.open), high: parseFloat(v.high),
-          low:  parseFloat(v.low),  close: parseFloat(v.close),
+          time:  new Date(v.datetime).getTime(),
+          open:  parseFloat(v.open),
+          high:  parseFloat(v.high),
+          low:   parseFloat(v.low),
+          close: parseFloat(v.close),
         }));
         setCandles(built);
         processSignal(built, currentPair);
@@ -174,6 +179,7 @@ export default function App() {
     return false;
   };
 
+  // ── Simulation tick ───────────────────────────────────────────────────────
   const simTick = (currentPair, currentTf) => {
     setCandles(prev => {
       if (!prev.length) return prev;
@@ -205,18 +211,27 @@ export default function App() {
     clearInterval(tickRef.current);
     setCandles([]); setSignal(null); setLivePrice(null);
     prevSigRef.current = null;
+
+    // Seed sim immediately so chart shows right away
     const seed = seedCandles(pair);
     setCandles(seed);
     processSignal(seed, pair);
     setMode("sim");
+
+    // Try live via proxy
     tryLive(pair, tf).then(ok => {
       if (ok) {
         intervalRef.current = setInterval(() => tryLive(pair, tf), 15000);
       } else {
+        // Fallback simulation
         tickRef.current = setInterval(() => simTick(pair, tf), 2000);
       }
     });
-    return () => { clearInterval(intervalRef.current); clearInterval(tickRef.current); };
+
+    return () => {
+      clearInterval(intervalRef.current);
+      clearInterval(tickRef.current);
+    };
   }, [pair, tf]);
 
   const dirColor = signal?.direction === "UP"  ? "#00FF88"
@@ -269,6 +284,19 @@ export default function App() {
       </div>
 
       <div style={{ padding:"14px 14px 0", maxWidth:480, margin:"0 auto" }}>
+
+        {/* Mode banner */}
+        {mode === "sim" && (
+          <div style={{ background:"#06101A", border:"1px solid #00D4FF33",
+            borderRadius:12, padding:"11px 14px", marginBottom:10,
+            display:"flex", gap:10, alignItems:"center" }}>
+            <span style={{ fontSize:16 }}>🔵</span>
+            <div style={{ fontSize:11, color:"#334155", lineHeight:1.5 }}>
+              <strong style={{ color:"#00D4FF" }}>Connecting to live data...</strong> Using
+              realistic simulation while connecting. Will switch to LIVE automatically.
+            </div>
+          </div>
+        )}
 
         {/* Pair selector */}
         <div style={{ background:"#0F1628", border:"1px solid #1A2540",
@@ -363,6 +391,7 @@ export default function App() {
                 </div>
               )}
             </div>
+
             <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
               <div style={{
                 width:52, height:52, borderRadius:12, fontSize:26,
@@ -382,6 +411,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* Strength bar */}
             <div style={{ marginBottom:12 }}>
               <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
                 <span style={{ fontSize:10, color:"#334155", fontWeight:700,
@@ -402,6 +432,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* EMA values */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 }}>
               {[
                 { label:"EMA 8",  val:signal.ema8,  color:"#00D4FF" },
@@ -418,6 +449,7 @@ export default function App() {
               ))}
             </div>
 
+            {/* Entry checklist */}
             {signal.direction !== "NEUTRAL" && (
               <div style={{ background:"#080C18", border:"1px solid #1A2540",
                 borderRadius:8, padding:"10px 12px" }}>
