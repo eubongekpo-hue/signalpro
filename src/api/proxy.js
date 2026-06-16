@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   const { symbol, interval } = req.query;
 
   try {
-    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=80&apikey=304179a7e4f24aacae4e576902f323f1`;
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=80&apikey=eca57d0ed80d4edab0c4633e057651af`;
     const response = await fetch(url);
     const data = await response.json();
 
