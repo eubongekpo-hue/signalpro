@@ -42,46 +42,103 @@ function calcEMA(data, period) {
   return out;
 }
 
+// ── ATR ───────────────────────────────────────────────────────────────────────
+function calcATR(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  const trs = candles.slice(1).map((c, i) => {
+    const prev = candles[i];
+    return Math.max(
+      c.high - c.low,
+      Math.abs(c.high - prev.close),
+      Math.abs(c.low  - prev.close)
+    );
+  });
+  const recent = trs.slice(-period);
+  return recent.reduce((a, b) => a + b, 0) / period;
+}
+
+// ── Swing levels ──────────────────────────────────────────────────────────────
+function getSwingLevels(candles, lookback = 10) {
+  const recent = candles.slice(-lookback);
+  const swingHigh = Math.max(...recent.map(c => c.high));
+  const swingLow  = Math.min(...recent.map(c => c.low));
+  return { swingHigh, swingLow };
+}
+
+// ── SL / TP calculator ────────────────────────────────────────────────────────
+function calcSLTP(candles, direction, price, decimals) {
+  const atr = calcATR(candles);
+  if (!atr) return null;
+
+  const { swingHigh, swingLow } = getSwingLevels(candles);
+  const buffer = atr * 0.3; // small buffer beyond swing
+
+  let sl, tp1, tp2, tp3;
+
+  if (direction === "UP") {
+    sl  = Math.min(swingLow - buffer, price - atr * 1.5);
+    const risk = price - sl;
+    tp1 = price + risk * 1;   // 1:1
+    tp2 = price + risk * 2;   // 1:2
+    tp3 = price + risk * 3;   // 1:3
+  } else {
+    sl  = Math.max(swingHigh + buffer, price + atr * 1.5);
+    const risk = sl - price;
+    tp1 = price - risk * 1;
+    tp2 = price - risk * 2;
+    tp3 = price - risk * 3;
+  }
+
+  const fmt = v => v.toFixed(decimals);
+  const risk    = Math.abs(price - sl);
+  const riskPct = ((risk / price) * 100).toFixed(2);
+
+  return {
+    sl:  fmt(sl),
+    tp1: fmt(tp1),
+    tp2: fmt(tp2),
+    tp3: fmt(tp3),
+    atr: fmt(atr),
+    riskPct,
+    riskPips: fmt(risk),
+  };
+}
+
+// ── Signal computation ────────────────────────────────────────────────────────
 function computeSignals(closes) {
-  if (closes.length < 22) return null;
+  if (closes.length < 13) return null;
   const last = closes[closes.length - 1];
 
-  // Fast signal: EMA 5/13
   const e5  = calcEMA(closes, 5);
   const e13 = calcEMA(closes, 13);
-  const le5  = e5[e5.length-1],   pe5  = e5.length > 1  ? e5[e5.length-2]  : le5;
+  const le5  = e5[e5.length-1],   pe5  = e5.length  > 1 ? e5[e5.length-2]  : le5;
   const le13 = e13[e13.length-1], pe13 = e13.length > 1 ? e13[e13.length-2]: le13;
-  const fastCross  = (pe5 <= pe13 && le5 > le13) || (pe5 >= pe13 && le5 < le13);
-  const fastDir    = le5 > le13 ? "UP" : le5 < le13 ? "DOWN" : "NEUTRAL";
-  const fastSpread = Math.abs(le5 - le13) / last;
-  const fastStr    = Math.min(99, Math.round(fastSpread * 15000 * 5));
+  const fastCross = (pe5 <= pe13 && le5 > le13) || (pe5 >= pe13 && le5 < le13);
+  const fastDir   = le5 > le13 ? "UP" : le5 < le13 ? "DOWN" : "NEUTRAL";
+  const fastStr   = Math.min(99, Math.round((Math.abs(le5 - le13) / last) * 15000 * 5));
 
-  // Slow signal: EMA 8/21
   let slowDir = "NEUTRAL", slowCross = false, slowStr = 0, e8 = [], e21 = [];
   if (closes.length >= 26) {
     e8  = calcEMA(closes, 8);
     e21 = calcEMA(closes, 21);
-    const le8  = e8[e8.length-1],   pe8  = e8.length > 1  ? e8[e8.length-2]  : le8;
+    const le8  = e8[e8.length-1],   pe8  = e8.length  > 1 ? e8[e8.length-2]  : le8;
     const le21 = e21[e21.length-1], pe21 = e21.length > 1 ? e21[e21.length-2]: le21;
     slowCross = (pe8 <= pe21 && le8 > le21) || (pe8 >= pe21 && le8 < le21);
     slowDir   = le8 > le21 ? "UP" : le8 < le21 ? "DOWN" : "NEUTRAL";
-    const sSpread = Math.abs(le8 - le21) / last;
-    slowStr = Math.min(99, Math.round(sSpread * 12000 * 8));
+    slowStr   = Math.min(99, Math.round((Math.abs(le8 - le21) / last) * 12000 * 8));
   }
 
-  const trend = slowStr > 60 ? "Strong Trend" : slowStr > 30 ? "Moderate" : fastStr > 40 ? "Developing" : "Weak";
-
-  // Both EMAs agree = confirmed signal
   const confirmed = fastDir === slowDir && slowDir !== "NEUTRAL";
   const direction = confirmed ? slowDir : fastDir;
   const crossover = slowCross || (fastCross && confirmed);
   const strength  = confirmed ? Math.round((fastStr + slowStr) / 2) : fastStr;
+  const trend     = slowStr > 60 ? "Strong Trend" : slowStr > 30 ? "Moderate" : fastStr > 40 ? "Developing" : "Weak";
 
   return {
     direction, strength, trend, crossover, confirmed,
     fastDir, fastCross, fastStr,
     slowDir, slowCross, slowStr,
-    ema5: e5[e5.length-1]   || 0,
+    ema5:  e5[e5.length-1]   || 0,
     ema13: e13[e13.length-1] || 0,
     ema8:  e8[e8.length-1]   || 0,
     ema21: e21[e21.length-1] || 0,
@@ -124,10 +181,10 @@ function MiniChart({ candles, sig }) {
           : ctx.lineTo(toX(candles.length - arr.length + i), toY(v)));
         ctx.stroke();
       };
-      draw(sig.allEma5.slice(-candles.length),  "#00FF88", 1.2); // fast green
-      draw(sig.allEma13.slice(-candles.length), "#FF3B5C", 1.2); // fast red
-      draw(sig.allEma8.slice(-candles.length),  "#00D4FF", 2);   // slow blue
-      draw(sig.allEma21.slice(-candles.length), "#FF8C00", 2);   // slow orange
+      draw(sig.allEma5.slice(-candles.length),  "#00FF8888", 1.2);
+      draw(sig.allEma13.slice(-candles.length), "#FF3B5C88", 1.2);
+      draw(sig.allEma8.slice(-candles.length),  "#00D4FF", 2);
+      draw(sig.allEma21.slice(-candles.length), "#FF8C00", 2);
     }
 
     const lp = candles[candles.length - 1].close;
@@ -136,7 +193,7 @@ function MiniChart({ candles, sig }) {
     ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8;
     ctx.fill(); ctx.shadowBlur = 0;
   }, [candles, sig]);
-  return <canvas ref={ref} width={300} height={110} style={{ width: "100%", height: 110 }} />;
+  return <canvas ref={ref} width={300} height={110} style={{ width:"100%", height:110 }} />;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -145,6 +202,7 @@ export default function App() {
   const [tf,         setTf]         = useState(TIMEFRAMES[1]);
   const [candles,    setCandles]    = useState([]);
   const [signal,     setSignal]     = useState(null);
+  const [sltp,       setSltp]       = useState(null);
   const [livePrice,  setLivePrice]  = useState(null);
   const [prevPrice,  setPrevPrice]  = useState(null);
   const [history,    setHistory]    = useState([]);
@@ -156,21 +214,27 @@ export default function App() {
   const prevSigRef  = useRef(null);
   const intervalRef = useRef(null);
   const alertOnRef  = useRef(true);
-  const liveRef     = useRef(false); // track if live connected
+  const liveRef     = useRef(false);
 
   useEffect(() => { alertOnRef.current = alertOn; }, [alertOn]);
 
-  const processCandles = useCallback((built, currentPair, isLive = false) => {
+  const processCandles = useCallback((built, currentPair) => {
     if (!built.length) return;
     const closes = built.map(c => c.close);
     const latest = closes[closes.length - 1];
 
-    // Only update price if live, or if not yet live
-    if (isLive || !liveRef.current) {
-      setLivePrice(prev => { setPrevPrice(prev); return latest; });
-    }
+    setLivePrice(prev => { setPrevPrice(prev); return latest; });
 
     const sig = computeSignals(closes);
+
+    // Compute SL/TP whenever we have a signal direction
+    if (sig && sig.direction !== "NEUTRAL") {
+      const levels = calcSLTP(built, sig.direction, latest, currentPair.decimals);
+      setSltp(levels);
+    } else {
+      setSltp(null);
+    }
+
     if (sig && prevSigRef.current) {
       if (sig.crossover && sig.direction !== prevSigRef.current.direction) {
         setPulseKey(k => k + 1);
@@ -181,9 +245,11 @@ export default function App() {
           confirmed: sig.confirmed,
         });
         setHistory(h => [{
-          time: new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }),
-          dir: sig.direction, price: latest.toFixed(currentPair.decimals),
-          pair: currentPair.label, strength: sig.strength,
+          time:      new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }),
+          dir:       sig.direction,
+          price:     latest.toFixed(currentPair.decimals),
+          pair:      currentPair.label,
+          strength:  sig.strength,
           confirmed: sig.confirmed,
         }, ...h].slice(0, 10));
       }
@@ -205,11 +271,8 @@ export default function App() {
           low:   parseFloat(v.low),  close: parseFloat(v.close),
         }));
         setCandles(built);
-        processCandles(built, currentPair, true);
-        if (!liveRef.current) {
-          liveRef.current = true;
-          setMode("live");
-        }
+        processCandles(built, currentPair);
+        if (!liveRef.current) { liveRef.current = true; setMode("live"); }
         return true;
       }
     } catch {}
@@ -218,26 +281,22 @@ export default function App() {
 
   useEffect(() => {
     clearInterval(intervalRef.current);
-    setCandles([]); setSignal(null); setLivePrice(null);
-    setLastAlert(null); prevSigRef.current = null;
-    liveRef.current = false; setMode("loading");
+    setCandles([]); setSignal(null); setSltp(null);
+    setLivePrice(null); setLastAlert(null);
+    prevSigRef.current = null; liveRef.current = false; setMode("loading");
 
-    // Fetch live immediately — no simulation seed at all
     tryLive(pair, tf).then(ok => {
       if (ok) {
-        setMode("live");
-        // Poll every 10 seconds for fresh data
         intervalRef.current = setInterval(() => tryLive(pair, tf), 10_000);
       } else {
         setMode("error");
       }
     });
-
     return () => clearInterval(intervalRef.current);
   }, [pair, tf]);
 
-  const dirColor = signal?.direction === "UP"   ? "#00FF88"
-                 : signal?.direction === "DOWN"  ? "#FF3B5C" : "#94A3B8";
+  const dirColor = signal?.direction === "UP"  ? "#00FF88"
+                 : signal?.direction === "DOWN" ? "#FF3B5C" : "#94A3B8";
 
   return (
     <div style={{ background:"#080C18", minHeight:"100vh", color:"#E2E8F0",
@@ -266,7 +325,7 @@ export default function App() {
             <div style={{ fontFamily:"'JetBrains Mono'", fontSize:15, fontWeight:700, letterSpacing:-0.5 }}>
               SIGNAL<span style={{ color:"#00D4FF" }}>PRO</span>
             </div>
-            <div style={{ fontSize:10, color:"#334155" }}>Live Forex · EMA 5/13 + 8/21</div>
+            <div style={{ fontSize:10, color:"#334155" }}>EMA 5/13 · 8/21 · SL/TP</div>
           </div>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -325,21 +384,8 @@ export default function App() {
               </div>
             </div>
             <button onClick={() => setLastAlert(null)} style={{
-              marginLeft:"auto", background:"transparent", color:"#334155",
-              fontSize:18, cursor:"pointer", padding:"4px 8px" }}>✕</button>
-          </div>
-        )}
-
-        {/* Error state */}
-        {mode === "error" && (
-          <div style={{ background:"#1A0008", border:"1px solid #FF3B5C44",
-            borderRadius:12, padding:"12px 14px", marginBottom:10,
-            display:"flex", gap:10, alignItems:"center" }}>
-            <span style={{ fontSize:18 }}>⚠️</span>
-            <div>
-              <div style={{ fontSize:12, fontWeight:700, color:"#FF3B5C", marginBottom:2 }}>Connection Failed</div>
-              <div style={{ fontSize:11, color:"#78716C" }}>Check your internet and try refreshing the page.</div>
-            </div>
+              marginLeft:"auto", background:"transparent",
+              color:"#334155", fontSize:18, cursor:"pointer", padding:"4px 8px" }}>✕</button>
           </div>
         )}
 
@@ -398,15 +444,14 @@ export default function App() {
                   : "#E2E8F0",
                 transition:"color 0.3s",
               }}>
-                {livePrice
-                  ? livePrice.toFixed(pair.decimals)
-                  : <span style={{ color:"#1E2A42", fontSize:20 }}>Loading...</span>}
+                {livePrice ? livePrice.toFixed(pair.decimals)
+                           : <span style={{ color:"#1E2A42", fontSize:18 }}>Connecting...</span>}
               </div>
             </div>
             <div style={{ textAlign:"right" }}>
               <div style={{ fontSize:10, color:"#334155" }}>CANDLES</div>
               <div style={{ fontSize:13, fontFamily:"'JetBrains Mono'", color:"#475569" }}>{candles.length}</div>
-              <div style={{ fontSize:8, color:"#1E2A42", marginTop:4, lineHeight:1.6 }}>
+              <div style={{ fontSize:8, color:"#1E2A42", marginTop:4, lineHeight:1.8 }}>
                 <span style={{ color:"#00FF88" }}>━</span> EMA5 <span style={{ color:"#FF3B5C" }}>━</span> EMA13<br/>
                 <span style={{ color:"#00D4FF" }}>━</span> EMA8 <span style={{ color:"#FF8C00" }}>━</span> EMA21
               </div>
@@ -457,7 +502,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Strength */}
+            {/* Strength bar */}
             <div style={{ marginBottom:12 }}>
               <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
                 <span style={{ fontSize:10, color:"#334155", fontWeight:700,
@@ -478,7 +523,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Dual EMA grid */}
+            {/* EMA values */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:6, marginBottom:12 }}>
               {[
                 { label:"EMA 5",  val:signal.ema5,  color:"#00FF88" },
@@ -488,7 +533,7 @@ export default function App() {
               ].map(({ label, val, color }) => (
                 <div key={label} style={{ background:"#080C18",
                   border:`1px solid ${color}33`, borderRadius:8, padding:"6px 8px" }}>
-                  <div style={{ fontSize:9, color, fontWeight:700, letterSpacing:0.5 }}>{label}</div>
+                  <div style={{ fontSize:9, color, fontWeight:700 }}>{label}</div>
                   <div style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
                     fontWeight:600, marginTop:2, color:"#CBD5E1" }}>
                     {val ? val.toFixed(pair.decimals) : "—"}
@@ -497,6 +542,54 @@ export default function App() {
               ))}
             </div>
 
+            {/* ── SL / TP ── */}
+            {sltp && signal.direction !== "NEUTRAL" && (
+              <div style={{ background:"#080C18", border:"1px solid #1A2540",
+                borderRadius:10, padding:"10px 12px", marginBottom:12 }}>
+                <div style={{ fontSize:10, color:"#334155", fontWeight:700,
+                  letterSpacing:1, textTransform:"uppercase", marginBottom:8 }}>
+                  SL / TP Levels
+                  <span style={{ fontSize:9, color:"#475569", marginLeft:6, fontWeight:400 }}>
+                    ATR: {sltp.atr} · Risk: {sltp.riskPct}%
+                  </span>
+                </div>
+
+                {/* Stop Loss */}
+                <div style={{ display:"flex", justifyContent:"space-between",
+                  alignItems:"center", marginBottom:6,
+                  background:"#FF3B5C12", border:"1px solid #FF3B5C33",
+                  borderRadius:8, padding:"8px 10px" }}>
+                  <div>
+                    <div style={{ fontSize:9, color:"#FF3B5C", fontWeight:700, letterSpacing:0.8 }}>
+                      🛑 STOP LOSS
+                    </div>
+                    <div style={{ fontSize:8, color:"#475569", marginTop:1 }}>
+                      {signal.direction==="UP" ? "Below recent swing low" : "Above recent swing high"}
+                    </div>
+                  </div>
+                  <div style={{ fontSize:16, fontWeight:800, fontFamily:"'JetBrains Mono'",
+                    color:"#FF3B5C" }}>{sltp.sl}</div>
+                </div>
+
+                {/* Take Profits */}
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:6 }}>
+                  {[
+                    { label:"TP 1", val:sltp.tp1, rr:"1:1", color:"#F59E0B" },
+                    { label:"TP 2", val:sltp.tp2, rr:"1:2", color:"#00D4FF" },
+                    { label:"TP 3", val:sltp.tp3, rr:"1:3", color:"#00FF88" },
+                  ].map(({ label, val, rr, color }) => (
+                    <div key={label} style={{ background:`${color}12`,
+                      border:`1px solid ${color}44`, borderRadius:8, padding:"8px 6px", textAlign:"center" }}>
+                      <div style={{ fontSize:9, color, fontWeight:700 }}>{label}</div>
+                      <div style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
+                        fontWeight:700, color:"#E2E8F0", marginTop:2 }}>{val}</div>
+                      <div style={{ fontSize:8, color:"#475569", marginTop:1 }}>{rr}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Entry checklist */}
             {signal.direction !== "NEUTRAL" && (
               <div style={{ background:"#080C18", border:"1px solid #1A2540",
@@ -504,10 +597,10 @@ export default function App() {
                 <div style={{ fontSize:10, color:"#334155", fontWeight:700,
                   letterSpacing:1, textTransform:"uppercase", marginBottom:6 }}>Entry Checklist</div>
                 {[
-                  { text: `Fast EMA (5/13): ${signal.fastDir}`, ok: signal.fastDir !== "NEUTRAL" },
-                  { text: `Slow EMA (8/21): ${signal.slowDir || "calculating..."}`, ok: signal.slowDir !== "NEUTRAL" && signal.slowDir === signal.fastDir },
+                  { text:`Fast EMA (5/13): ${signal.fastDir}`, ok: signal.fastDir !== "NEUTRAL" },
+                  { text:`Slow EMA (8/21): ${signal.slowDir || "calculating..."}`, ok: signal.slowDir !== "NEUTRAL" && signal.slowDir === signal.fastDir },
                   { text: signal.confirmed ? "Both EMAs agree — strong entry ✓" : "Wait for both EMAs to align", ok: signal.confirmed },
-                  { text: "Set stop-loss beyond recent swing", ok: false },
+                  { text:"Enter at TP1 first, move SL to entry after", ok:false },
                 ].map((item, i) => (
                   <div key={i} style={{ fontSize:11,
                     color: item.ok ? "#94A3B8" : "#475569", marginBottom:3, paddingLeft:2 }}>
@@ -519,7 +612,7 @@ export default function App() {
           </div>
         )}
 
-        {/* History */}
+        {/* Crossover History */}
         {history.length > 0 && (
           <div style={{ background:"#0F1628", border:"1px solid #1A2540",
             borderRadius:12, padding:"12px 14px", marginBottom:10 }}>
@@ -534,7 +627,8 @@ export default function App() {
               }}>
                 <span style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
                   color:"#334155", minWidth:72 }}>{h.time}</span>
-                <span style={{ fontSize:10, color:"#475569", fontFamily:"'JetBrains Mono'" }}>{h.pair}</span>
+                <span style={{ fontSize:10, color:"#475569",
+                  fontFamily:"'JetBrains Mono'" }}>{h.pair}</span>
                 <span style={{ fontSize:11, fontWeight:700, fontFamily:"'JetBrains Mono'",
                   color: h.dir==="UP" ? "#00FF88" : "#FF3B5C" }}>
                   {h.dir==="UP" ? "↑" : "↓"} {h.price}
@@ -550,8 +644,8 @@ export default function App() {
 
         <div style={{ fontSize:10, color:"#1E2A42", textAlign:"center",
           lineHeight:1.7, padding:"4px 8px" }}>
-          ⚠️ Educational use only. Not financial advice.<br/>
-          Always use stop-losses and your own analysis.
+          ⚠️ Educational use only. SL/TP are calculated suggestions, not guarantees.<br/>
+          Always apply your own risk management before entering any trade.
         </div>
       </div>
     </div>
