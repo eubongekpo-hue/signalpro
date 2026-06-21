@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const PAIRS = [
-  { label: "XAU/USD", symbol: "XAU/USD", decimals: 2,  base: 3316.00, vol: 2.5    },
-  { label: "EUR/USD", symbol: "EUR/USD", decimals: 5,  base: 1.08450, vol: 0.00035 },
-  { label: "GBP/USD", symbol: "GBP/USD", decimals: 5,  base: 1.27230, vol: 0.00045 },
-  { label: "USD/JPY", symbol: "USD/JPY", decimals: 3,  base: 149.520, vol: 0.055   },
-  { label: "CHF/JPY", symbol: "CHF/JPY", decimals: 3,  base: 168.340, vol: 0.065   },
+  { label: "XAU/USD", symbol: "XAU/USD", decimals: 2,  base: 3316.00, vol: 2.5,    strengthScale: 800  },
+  { label: "EUR/USD", symbol: "EUR/USD", decimals: 5,  base: 1.08450, vol: 0.00035, strengthScale: 80000 },
+  { label: "GBP/USD", symbol: "GBP/USD", decimals: 5,  base: 1.27230, vol: 0.00045, strengthScale: 80000 },
+  { label: "USD/JPY", symbol: "USD/JPY", decimals: 3,  base: 149.520, vol: 0.055,   strengthScale: 3000  },
+  { label: "CHF/JPY", symbol: "CHF/JPY", decimals: 3,  base: 168.340, vol: 0.065,   strengthScale: 3000  },
 ];
 
 const TIMEFRAMES = [
@@ -38,7 +38,10 @@ function calcEMA(data, period) {
   const k = 2 / (period + 1);
   let prev = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
   const out = [prev];
-  for (let i = period; i < data.length; i++) { prev = data[i] * k + prev * (1 - k); out.push(prev); }
+  for (let i = period; i < data.length; i++) {
+    prev = data[i] * k + prev * (1 - k);
+    out.push(prev);
+  }
   return out;
 }
 
@@ -47,101 +50,114 @@ function calcATR(candles, period = 14) {
   if (candles.length < period + 1) return null;
   const trs = candles.slice(1).map((c, i) => {
     const prev = candles[i];
-    return Math.max(
-      c.high - c.low,
-      Math.abs(c.high - prev.close),
-      Math.abs(c.low  - prev.close)
-    );
+    return Math.max(c.high - c.low, Math.abs(c.high - prev.close), Math.abs(c.low - prev.close));
   });
-  const recent = trs.slice(-period);
-  return recent.reduce((a, b) => a + b, 0) / period;
+  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
 
 // ── Swing levels ──────────────────────────────────────────────────────────────
 function getSwingLevels(candles, lookback = 10) {
   const recent = candles.slice(-lookback);
-  const swingHigh = Math.max(...recent.map(c => c.high));
-  const swingLow  = Math.min(...recent.map(c => c.low));
-  return { swingHigh, swingLow };
+  return {
+    swingHigh: Math.max(...recent.map(c => c.high)),
+    swingLow:  Math.min(...recent.map(c => c.low)),
+  };
 }
 
-// ── SL / TP calculator ────────────────────────────────────────────────────────
+// ── SL/TP ─────────────────────────────────────────────────────────────────────
 function calcSLTP(candles, direction, price, decimals) {
   const atr = calcATR(candles);
   if (!atr) return null;
-
   const { swingHigh, swingLow } = getSwingLevels(candles);
-  const buffer = atr * 0.3; // small buffer beyond swing
-
+  const buffer = atr * 0.3;
   let sl, tp1, tp2, tp3;
-
   if (direction === "UP") {
-    sl  = Math.min(swingLow - buffer, price - atr * 1.5);
+    sl = Math.min(swingLow - buffer, price - atr * 1.5);
     const risk = price - sl;
-    tp1 = price + risk * 1;   // 1:1
-    tp2 = price + risk * 2;   // 1:2
-    tp3 = price + risk * 3;   // 1:3
+    tp1 = price + risk * 1;
+    tp2 = price + risk * 2;
+    tp3 = price + risk * 3;
   } else {
-    sl  = Math.max(swingHigh + buffer, price + atr * 1.5);
+    sl = Math.max(swingHigh + buffer, price + atr * 1.5);
     const risk = sl - price;
     tp1 = price - risk * 1;
     tp2 = price - risk * 2;
     tp3 = price - risk * 3;
   }
-
-  const fmt = v => v.toFixed(decimals);
-  const risk    = Math.abs(price - sl);
-  const riskPct = ((risk / price) * 100).toFixed(2);
-
+  const risk = Math.abs(price - sl);
   return {
-    sl:  fmt(sl),
-    tp1: fmt(tp1),
-    tp2: fmt(tp2),
-    tp3: fmt(tp3),
-    atr: fmt(atr),
-    riskPct,
-    riskPips: fmt(risk),
+    sl:  sl.toFixed(decimals),
+    tp1: tp1.toFixed(decimals),
+    tp2: tp2.toFixed(decimals),
+    tp3: tp3.toFixed(decimals),
+    atr: atr.toFixed(decimals),
+    riskPct:  ((risk / price) * 100).toFixed(2),
+    riskPips: risk.toFixed(decimals),
   };
 }
 
-// ── Signal computation ────────────────────────────────────────────────────────
-function computeSignals(closes) {
-  if (closes.length < 13) return null;
-  const last = closes[closes.length - 1];
+// ── Trend strength scaled per pair ────────────────────────────────────────────
+function calcStrength(emaDiff, price, scale) {
+  // Use percentage distance between EMAs, scaled to 0-100
+  const pctDiff = (Math.abs(emaDiff) / price) * 100;
+  // Scale: 0.01% diff = ~20%, 0.05% = ~60%, 0.1% = ~85%, 0.2% = ~99%
+  const raw = Math.log1p(pctDiff * scale) / Math.log1p(scale) * 100;
+  return Math.min(99, Math.max(1, Math.round(raw)));
+}
 
+// ── Signal computation ────────────────────────────────────────────────────────
+function computeSignals(closes, pair) {
+  if (closes.length < 13) return null;
+  const last  = closes[closes.length - 1];
+  const scale = pair.strengthScale;
+
+  // Fast: EMA 5/13
   const e5  = calcEMA(closes, 5);
   const e13 = calcEMA(closes, 13);
   const le5  = e5[e5.length-1],   pe5  = e5.length  > 1 ? e5[e5.length-2]  : le5;
   const le13 = e13[e13.length-1], pe13 = e13.length > 1 ? e13[e13.length-2]: le13;
   const fastCross = (pe5 <= pe13 && le5 > le13) || (pe5 >= pe13 && le5 < le13);
   const fastDir   = le5 > le13 ? "UP" : le5 < le13 ? "DOWN" : "NEUTRAL";
-  const fastStr   = Math.min(99, Math.round((Math.abs(le5 - le13) / last) * 15000 * 5));
+  const fastStr   = calcStrength(le5 - le13, last, scale);
 
-  let slowDir = "NEUTRAL", slowCross = false, slowStr = 0, e8 = [], e21 = [];
+  // Slow: EMA 8/21
+  let slowDir = "NEUTRAL", slowCross = false, slowStr = 0;
+  let e8 = [], e21 = [], le8 = 0, le21 = 0;
   if (closes.length >= 26) {
     e8  = calcEMA(closes, 8);
     e21 = calcEMA(closes, 21);
-    const le8  = e8[e8.length-1],   pe8  = e8.length  > 1 ? e8[e8.length-2]  : le8;
-    const le21 = e21[e21.length-1], pe21 = e21.length > 1 ? e21[e21.length-2]: le21;
+    le8  = e8[e8.length-1];
+    le21 = e21[e21.length-1];
+    const pe8  = e8.length  > 1 ? e8[e8.length-2]  : le8;
+    const pe21 = e21.length > 1 ? e21[e21.length-2]: le21;
     slowCross = (pe8 <= pe21 && le8 > le21) || (pe8 >= pe21 && le8 < le21);
     slowDir   = le8 > le21 ? "UP" : le8 < le21 ? "DOWN" : "NEUTRAL";
-    slowStr   = Math.min(99, Math.round((Math.abs(le8 - le21) / last) * 12000 * 8));
+    slowStr   = calcStrength(le8 - le21, last, scale);
   }
 
   const confirmed = fastDir === slowDir && slowDir !== "NEUTRAL";
   const direction = confirmed ? slowDir : fastDir;
   const crossover = slowCross || (fastCross && confirmed);
-  const strength  = confirmed ? Math.round((fastStr + slowStr) / 2) : fastStr;
-  const trend     = slowStr > 60 ? "Strong Trend" : slowStr > 30 ? "Moderate" : fastStr > 40 ? "Developing" : "Weak";
+
+  // Combined strength — weighted average, boosted if both agree
+  let strength;
+  if (confirmed && slowStr > 0) {
+    strength = Math.min(99, Math.round((fastStr * 0.4 + slowStr * 0.6) * 1.15));
+  } else {
+    strength = fastStr;
+  }
+
+  const trend = strength >= 70 ? "Strong Trend"
+              : strength >= 45 ? "Moderate"
+              : strength >= 25 ? "Developing"
+              : "Weak / Ranging";
 
   return {
     direction, strength, trend, crossover, confirmed,
     fastDir, fastCross, fastStr,
     slowDir, slowCross, slowStr,
-    ema5:  e5[e5.length-1]   || 0,
-    ema13: e13[e13.length-1] || 0,
-    ema8:  e8[e8.length-1]   || 0,
-    ema21: e21[e21.length-1] || 0,
+    ema5:  le5,  ema13: le13,
+    ema8:  le8,  ema21: le21,
     allEma5: e5, allEma13: e13, allEma8: e8, allEma21: e21,
     price: last,
   };
@@ -181,14 +197,15 @@ function MiniChart({ candles, sig }) {
           : ctx.lineTo(toX(candles.length - arr.length + i), toY(v)));
         ctx.stroke();
       };
-      draw(sig.allEma5.slice(-candles.length),  "#00FF8888", 1.2);
-      draw(sig.allEma13.slice(-candles.length), "#FF3B5C88", 1.2);
+      draw(sig.allEma5.slice(-candles.length),  "#00FF8899", 1.2);
+      draw(sig.allEma13.slice(-candles.length), "#FF3B5C99", 1.2);
       draw(sig.allEma8.slice(-candles.length),  "#00D4FF", 2);
       draw(sig.allEma21.slice(-candles.length), "#FF8C00", 2);
     }
 
     const lp = candles[candles.length - 1].close;
-    ctx.beginPath(); ctx.arc(toX(candles.length - 1), toY(lp), 4, 0, Math.PI * 2);
+    ctx.beginPath();
+    ctx.arc(toX(candles.length - 1), toY(lp), 4, 0, Math.PI * 2);
     ctx.fillStyle   = sig?.direction === "UP" ? "#00FF88" : sig?.direction === "DOWN" ? "#FF3B5C" : "#00D4FF";
     ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8;
     ctx.fill(); ctx.shadowBlur = 0;
@@ -215,22 +232,20 @@ export default function App() {
   const intervalRef = useRef(null);
   const alertOnRef  = useRef(true);
   const liveRef     = useRef(false);
+  const pairRef     = useRef(pair);
 
   useEffect(() => { alertOnRef.current = alertOn; }, [alertOn]);
+  useEffect(() => { pairRef.current = pair; }, [pair]);
 
   const processCandles = useCallback((built, currentPair) => {
     if (!built.length) return;
     const closes = built.map(c => c.close);
     const latest = closes[closes.length - 1];
-
     setLivePrice(prev => { setPrevPrice(prev); return latest; });
 
-    const sig = computeSignals(closes);
-
-    // Compute SL/TP whenever we have a signal direction
+    const sig = computeSignals(closes, currentPair);
     if (sig && sig.direction !== "NEUTRAL") {
-      const levels = calcSLTP(built, sig.direction, latest, currentPair.decimals);
-      setSltp(levels);
+      setSltp(calcSLTP(built, sig.direction, latest, currentPair.decimals));
     } else {
       setSltp(null);
     }
@@ -240,17 +255,13 @@ export default function App() {
         setPulseKey(k => k + 1);
         if (alertOnRef.current) playAlert(sig.direction);
         setLastAlert({
-          dir: sig.direction,
+          dir: sig.direction, confirmed: sig.confirmed,
           time: new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }),
-          confirmed: sig.confirmed,
         });
         setHistory(h => [{
-          time:      new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }),
-          dir:       sig.direction,
-          price:     latest.toFixed(currentPair.decimals),
-          pair:      currentPair.label,
-          strength:  sig.strength,
-          confirmed: sig.confirmed,
+          time: new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }),
+          dir: sig.direction, price: latest.toFixed(currentPair.decimals),
+          pair: currentPair.label, strength: sig.strength, confirmed: sig.confirmed,
         }, ...h].slice(0, 10));
       }
     }
@@ -287,7 +298,7 @@ export default function App() {
 
     tryLive(pair, tf).then(ok => {
       if (ok) {
-        intervalRef.current = setInterval(() => tryLive(pair, tf), 10_000);
+        intervalRef.current = setInterval(() => tryLive(pairRef.current, tf), 10_000);
       } else {
         setMode("error");
       }
@@ -297,6 +308,12 @@ export default function App() {
 
   const dirColor = signal?.direction === "UP"  ? "#00FF88"
                  : signal?.direction === "DOWN" ? "#FF3B5C" : "#94A3B8";
+
+  // Strength color
+  const strColor = !signal ? "#94A3B8"
+                 : signal.strength >= 70 ? "#00FF88"
+                 : signal.strength >= 45 ? "#F59E0B"
+                 : "#FF3B5C";
 
   return (
     <div style={{ background:"#080C18", minHeight:"100vh", color:"#E2E8F0",
@@ -343,7 +360,8 @@ export default function App() {
             <div style={{ display:"flex", alignItems:"center", gap:6, justifyContent:"flex-end" }}>
               {mode === "loading"
                 ? <div style={{ width:10, height:10, border:"2px solid #F59E0B",
-                    borderTopColor:"transparent", borderRadius:"50%", animation:"spin 0.8s linear infinite" }} />
+                    borderTopColor:"transparent", borderRadius:"50%",
+                    animation:"spin 0.8s linear infinite" }} />
                 : <div style={{ width:7, height:7, borderRadius:"50%",
                     background: mode==="live" ? "#00FF88" : "#FF3B5C",
                     animation:"blink 2s infinite" }} />
@@ -377,7 +395,8 @@ export default function App() {
               <div style={{ fontSize:14, fontWeight:800, fontFamily:"'JetBrains Mono'",
                 color: lastAlert.dir==="UP" ? "#00FF88" : "#FF3B5C" }}>
                 ⚡ {lastAlert.dir==="UP" ? "BUY SIGNAL" : "SELL SIGNAL"}
-                {lastAlert.confirmed && <span style={{ fontSize:11, marginLeft:8, color:"#00D4FF" }}>CONFIRMED</span>}
+                {lastAlert.confirmed &&
+                  <span style={{ fontSize:11, marginLeft:8, color:"#00D4FF" }}>CONFIRMED</span>}
               </div>
               <div style={{ fontSize:11, color:"#64748B", marginTop:2 }}>
                 EMA Crossover · {lastAlert.time} · {pair.label}
@@ -450,10 +469,14 @@ export default function App() {
             </div>
             <div style={{ textAlign:"right" }}>
               <div style={{ fontSize:10, color:"#334155" }}>CANDLES</div>
-              <div style={{ fontSize:13, fontFamily:"'JetBrains Mono'", color:"#475569" }}>{candles.length}</div>
+              <div style={{ fontSize:13, fontFamily:"'JetBrains Mono'", color:"#475569" }}>
+                {candles.length}
+              </div>
               <div style={{ fontSize:8, color:"#1E2A42", marginTop:4, lineHeight:1.8 }}>
-                <span style={{ color:"#00FF88" }}>━</span> EMA5 <span style={{ color:"#FF3B5C" }}>━</span> EMA13<br/>
-                <span style={{ color:"#00D4FF" }}>━</span> EMA8 <span style={{ color:"#FF8C00" }}>━</span> EMA21
+                <span style={{ color:"#00FF88" }}>━</span> EMA5&nbsp;
+                <span style={{ color:"#FF3B5C" }}>━</span> EMA13<br/>
+                <span style={{ color:"#00D4FF" }}>━</span> EMA8&nbsp;
+                <span style={{ color:"#FF8C00" }}>━</span> EMA21
               </div>
             </div>
           </div>
@@ -476,7 +499,9 @@ export default function App() {
               <div style={{ display:"flex", gap:6 }}>
                 {signal.crossover && (
                   <div style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
-                    color:"#00D4FF", fontWeight:700, animation:"flash 1s ease 3" }}>⚡ CROSSOVER</div>
+                    color:"#00D4FF", fontWeight:700, animation:"flash 1s ease 3" }}>
+                    ⚡ CROSSOVER
+                  </div>
                 )}
                 {signal.confirmed && (
                   <div style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
@@ -508,18 +533,22 @@ export default function App() {
                 <span style={{ fontSize:10, color:"#334155", fontWeight:700,
                   textTransform:"uppercase", letterSpacing:1 }}>Trend Strength</span>
                 <span style={{ fontSize:11, fontFamily:"'JetBrains Mono'",
-                  fontWeight:700, color:dirColor }}>{signal.strength}%</span>
+                  fontWeight:700, color:strColor }}>{signal.strength}%</span>
               </div>
-              <div style={{ height:5, background:"#0D1320", borderRadius:999, overflow:"hidden" }}>
+              <div style={{ height:6, background:"#0D1320", borderRadius:999, overflow:"hidden" }}>
                 <div style={{
                   height:"100%", borderRadius:999, transition:"width 1s ease",
                   width:`${signal.strength}%`,
-                  background: signal.direction==="UP"
+                  background: signal.strength >= 70
                     ? "linear-gradient(90deg,#00994D,#00FF88)"
-                    : signal.direction==="DOWN"
-                    ? "linear-gradient(90deg,#991F33,#FF3B5C)"
-                    : "#334155",
+                    : signal.strength >= 45
+                    ? "linear-gradient(90deg,#B45309,#F59E0B)"
+                    : "linear-gradient(90deg,#991F33,#FF3B5C)",
                 }} />
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between",
+                fontSize:8, color:"#334155", marginTop:3 }}>
+                <span>Weak</span><span>Developing</span><span>Moderate</span><span>Strong</span>
               </div>
             </div>
 
@@ -542,7 +571,7 @@ export default function App() {
               ))}
             </div>
 
-            {/* ── SL / TP ── */}
+            {/* SL/TP */}
             {sltp && signal.direction !== "NEUTRAL" && (
               <div style={{ background:"#080C18", border:"1px solid #1A2540",
                 borderRadius:10, padding:"10px 12px", marginBottom:12 }}>
@@ -553,25 +582,18 @@ export default function App() {
                     ATR: {sltp.atr} · Risk: {sltp.riskPct}%
                   </span>
                 </div>
-
-                {/* Stop Loss */}
-                <div style={{ display:"flex", justifyContent:"space-between",
-                  alignItems:"center", marginBottom:6,
-                  background:"#FF3B5C12", border:"1px solid #FF3B5C33",
-                  borderRadius:8, padding:"8px 10px" }}>
+                <div style={{ background:"#FF3B5C12", border:"1px solid #FF3B5C33",
+                  borderRadius:8, padding:"8px 10px", marginBottom:6,
+                  display:"flex", justifyContent:"space-between", alignItems:"center" }}>
                   <div>
-                    <div style={{ fontSize:9, color:"#FF3B5C", fontWeight:700, letterSpacing:0.8 }}>
-                      🛑 STOP LOSS
-                    </div>
+                    <div style={{ fontSize:9, color:"#FF3B5C", fontWeight:700 }}>🛑 STOP LOSS</div>
                     <div style={{ fontSize:8, color:"#475569", marginTop:1 }}>
                       {signal.direction==="UP" ? "Below recent swing low" : "Above recent swing high"}
                     </div>
                   </div>
-                  <div style={{ fontSize:16, fontWeight:800, fontFamily:"'JetBrains Mono'",
-                    color:"#FF3B5C" }}>{sltp.sl}</div>
+                  <div style={{ fontSize:16, fontWeight:800,
+                    fontFamily:"'JetBrains Mono'", color:"#FF3B5C" }}>{sltp.sl}</div>
                 </div>
-
-                {/* Take Profits */}
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:6 }}>
                   {[
                     { label:"TP 1", val:sltp.tp1, rr:"1:1", color:"#F59E0B" },
@@ -579,7 +601,8 @@ export default function App() {
                     { label:"TP 3", val:sltp.tp3, rr:"1:3", color:"#00FF88" },
                   ].map(({ label, val, rr, color }) => (
                     <div key={label} style={{ background:`${color}12`,
-                      border:`1px solid ${color}44`, borderRadius:8, padding:"8px 6px", textAlign:"center" }}>
+                      border:`1px solid ${color}44`, borderRadius:8,
+                      padding:"8px 6px", textAlign:"center" }}>
                       <div style={{ fontSize:9, color, fontWeight:700 }}>{label}</div>
                       <div style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
                         fontWeight:700, color:"#E2E8F0", marginTop:2 }}>{val}</div>
@@ -600,10 +623,12 @@ export default function App() {
                   { text:`Fast EMA (5/13): ${signal.fastDir}`, ok: signal.fastDir !== "NEUTRAL" },
                   { text:`Slow EMA (8/21): ${signal.slowDir || "calculating..."}`, ok: signal.slowDir !== "NEUTRAL" && signal.slowDir === signal.fastDir },
                   { text: signal.confirmed ? "Both EMAs agree — strong entry ✓" : "Wait for both EMAs to align", ok: signal.confirmed },
-                  { text:"Enter at TP1 first, move SL to entry after", ok:false },
+                  { text:"Enter at open of next candle after signal", ok: false },
+                  { text:"Move SL to entry after TP1 is hit", ok: false },
                 ].map((item, i) => (
                   <div key={i} style={{ fontSize:11,
-                    color: item.ok ? "#94A3B8" : "#475569", marginBottom:3, paddingLeft:2 }}>
+                    color: item.ok ? "#94A3B8" : "#475569",
+                    marginBottom:3, paddingLeft:2 }}>
                     {item.ok ? "✅" : "⚠️"} {item.text}
                   </div>
                 ))}
@@ -617,12 +642,14 @@ export default function App() {
           <div style={{ background:"#0F1628", border:"1px solid #1A2540",
             borderRadius:12, padding:"12px 14px", marginBottom:10 }}>
             <div style={{ fontSize:10, color:"#334155", letterSpacing:1.2,
-              fontWeight:700, textTransform:"uppercase", marginBottom:10 }}>Crossover History</div>
+              fontWeight:700, textTransform:"uppercase", marginBottom:10 }}>
+              Crossover History
+            </div>
             {history.map((h, i) => (
               <div key={i} style={{
                 display:"flex", justifyContent:"space-between", alignItems:"center",
                 padding:"7px 0",
-                borderBottom: i < history.length-1 ? "1px solid #0D1320" : "none",
+                borderBottom: i < history.length - 1 ? "1px solid #0D1320" : "none",
                 animation: i===0 ? "slideIn 0.3s ease" : "none",
               }}>
                 <span style={{ fontSize:10, fontFamily:"'JetBrains Mono'",
